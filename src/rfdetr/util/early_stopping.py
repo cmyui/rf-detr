@@ -77,8 +77,7 @@ class EarlyStoppingCallback:
             current_map = regular_map
             metric_source = "regular"
         else:
-            if self.verbose:
-                raise ValueError("No valid mAP metric found!")
+            # No eval metrics available (e.g. eval was skipped via eval_interval)
             return
 
         if self.verbose:
