@@ -202,7 +202,10 @@ class Model:
         if args.distributed:
             if args.sync_bn:
                 model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+            ddp_kwargs = dict(device_ids=[args.gpu], find_unused_parameters=True)
+            if getattr(args, "segmentation_head", False):
+                ddp_kwargs["static_graph"] = True
+            model = torch.nn.parallel.DistributedDataParallel(model, **ddp_kwargs)
             model_without_ddp = model.module
 
         n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -457,41 +460,49 @@ class Model:
 
                         save_on_master(weights, checkpoint_path)
 
-            with torch.no_grad():
-                test_stats, coco_evaluator = evaluate(
-                    model, criterion, postprocess, data_loader_val, base_ds, device, args=args, header="Test"
-                )
-            if not args.segmentation_head:
-                map_regular = test_stats["coco_eval_bbox"][0]
-            else:
-                map_regular = test_stats["coco_eval_masks"][0]
-            _isbest = best_map_holder.update(map_regular, epoch, is_ema=False)
-            if _isbest:
-                best_map_5095 = max(best_map_5095, map_regular)
-                if not args.segmentation_head:
-                    map50 = test_stats["coco_eval_bbox"][1]
-                else:
-                    map50 = test_stats["coco_eval_masks"][1]
-                best_map_50 = max(best_map_50, map50)
-                checkpoint_path = output_dir / "checkpoint_best_regular.pth"
-                if not args.dont_save_weights:
-                    save_on_master(
-                        {
-                            "model": model_without_ddp.state_dict(),
-                            "optimizer": optimizer.state_dict(),
-                            "lr_scheduler": lr_scheduler.state_dict(),
-                            "epoch": epoch,
-                            "args": args,
-                        },
-                        checkpoint_path,
+            eval_interval = getattr(args, "eval_interval", 1)
+            should_eval = (epoch + 1) % eval_interval == 0 or epoch == args.epochs - 1
+            if should_eval:
+                with torch.no_grad():
+                    test_stats, coco_evaluator = evaluate(
+                        model, criterion, postprocess, data_loader_val, base_ds, device, args=args, header="Test"
                     )
+                if not args.segmentation_head:
+                    map_regular = test_stats["coco_eval_bbox"][0]
+                else:
+                    map_regular = test_stats["coco_eval_masks"][0]
+                _isbest = best_map_holder.update(map_regular, epoch, is_ema=False)
+                if _isbest:
+                    best_map_5095 = max(best_map_5095, map_regular)
+                    if not args.segmentation_head:
+                        map50 = test_stats["coco_eval_bbox"][1]
+                    else:
+                        map50 = test_stats["coco_eval_masks"][1]
+                    best_map_50 = max(best_map_50, map50)
+                    checkpoint_path = output_dir / "checkpoint_best_regular.pth"
+                    if not args.dont_save_weights:
+                        save_on_master(
+                            {
+                                "model": model_without_ddp.state_dict(),
+                                "optimizer": optimizer.state_dict(),
+                                "lr_scheduler": lr_scheduler.state_dict(),
+                                "epoch": epoch,
+                                "args": args,
+                            },
+                            checkpoint_path,
+                        )
+            else:
+                logger.info("Skipping eval at epoch %d (eval every %d epochs)", epoch, eval_interval)
+                test_stats = {}
+                coco_evaluator = None
+
             log_stats = {
                 **{f"train_{k}": v for k, v in train_stats.items()},
                 **{f"test_{k}": v for k, v in test_stats.items()},
                 "epoch": epoch,
                 "n_parameters": n_parameters,
             }
-            if args.use_ema:
+            if args.use_ema and should_eval:
                 ema_test_stats, _ = evaluate(
                     self.ema_m.module,
                     criterion,

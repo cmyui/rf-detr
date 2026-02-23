@@ -293,6 +293,8 @@ class TrainConfig(BaseModel):
     lr_drop: int = 100
     checkpoint_interval: int = 10
     warmup_epochs: float = 0.0
+    lr_scheduler: Literal["step", "cosine"] = "step"
+    eval_interval: int = 1
     lr_vit_layer_decay: float = 0.8
     lr_component_decay: float = 0.7
     drop_path: float = 0.0
