@@ -735,7 +735,7 @@ class AlbumentationsWrapper:
             masks_list = [mask for mask in masks_np]
         # Apply transform
         transform_kwargs = {"image": image_np, "bboxes": boxes_np, "category_ids": labels, "idxs": idxs}
-        if masks_list is not None:
+        if masks_list:
             transform_kwargs["masks"] = masks_list
         augmented = self.transform(**transform_kwargs)
         target_out: Dict[str, Any] = target.copy()
@@ -756,7 +756,7 @@ class AlbumentationsWrapper:
             target_out["labels"] = torch.tensor(augmented["category_ids"], dtype=torch.long)
             target_out.update(self._filter_per_instance_fields(target, num_boxes, kept_idxs))
         image_out = Image.fromarray(augmented["image"])
-        if masks_list is not None and "masks" in augmented:
+        if masks_list and "masks" in augmented:
             height, width = augmented["image"].shape[:2]
             masks_aug = augmented["masks"]
             masks_aug = [masks_aug[int(i)] for i in kept_idxs]
