@@ -35,7 +35,7 @@ from typing import Callable, DefaultDict, List
 import numpy as np
 import torch
 from peft import LoraConfig, get_peft_model
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, Subset
 
 import rfdetr.util.misc as utils
 from rfdetr.assets.model_weights import (
@@ -312,6 +312,28 @@ class Model:
             num_workers=num_workers,
         )
         base_ds = get_coco_api_from_dataset(dataset_val)
+
+        light_eval_size = getattr(args, "light_eval_size", 0)
+        if light_eval_size > 0 and light_eval_size < len(dataset_val):
+            light_indices = list(range(light_eval_size))
+            light_subset = Subset(dataset_val, light_indices)
+            if args.distributed:
+                light_sampler = DistributedSampler(light_subset, shuffle=False)
+            else:
+                light_sampler = torch.utils.data.SequentialSampler(light_subset)
+            data_loader_light = DataLoader(
+                light_subset,
+                args.batch_size,
+                sampler=light_sampler,
+                drop_last=False,
+                collate_fn=utils.collate_fn,
+                num_workers=num_workers,
+            )
+            light_base_ds = get_coco_api_from_dataset(light_subset)
+            logger.info("Light eval enabled: %d / %d val images", light_eval_size, len(dataset_val))
+        else:
+            data_loader_light = None
+            light_base_ds = None
         if args.run_test:
             data_loader_test = DataLoader(
                 dataset_test,
@@ -491,6 +513,12 @@ class Model:
                             },
                             checkpoint_path,
                         )
+            elif data_loader_light is not None:
+                logger.info("Running light eval at epoch %d (%d images)", epoch, light_eval_size)
+                with torch.no_grad():
+                    test_stats, coco_evaluator = evaluate(
+                        model, criterion, postprocess, data_loader_light, light_base_ds, device, args=args, header="Light-Test"
+                    )
             else:
                 logger.info("Skipping eval at epoch %d (eval every %d epochs)", epoch, eval_interval)
                 test_stats = {}
@@ -502,16 +530,21 @@ class Model:
                 "epoch": epoch,
                 "n_parameters": n_parameters,
             }
-            if args.use_ema and should_eval:
+            did_any_eval = should_eval or (data_loader_light is not None and not should_eval)
+            if args.use_ema and did_any_eval:
+                if should_eval:
+                    ema_loader, ema_base, ema_header = data_loader_val, base_ds, "Test-ema"
+                else:
+                    ema_loader, ema_base, ema_header = data_loader_light, light_base_ds, "Light-Test-ema"
                 ema_test_stats, _ = evaluate(
                     self.ema_m.module,
                     criterion,
                     postprocess,
-                    data_loader_val,
-                    base_ds,
+                    ema_loader,
+                    ema_base,
                     device,
                     args=args,
-                    header="Test-ema",
+                    header=ema_header,
                 )
                 log_stats.update({f"ema_test_{k}": v for k, v in ema_test_stats.items()})
                 if not args.segmentation_head:
@@ -520,7 +553,7 @@ class Model:
                     map_ema = ema_test_stats["coco_eval_masks"][0]
                 best_map_ema_5095 = max(best_map_ema_5095, map_ema)
                 _isbest = best_map_holder.update(map_ema, epoch, is_ema=True)
-                if _isbest:
+                if _isbest and should_eval:
                     if not args.segmentation_head:
                         map_ema_50 = ema_test_stats["coco_eval_bbox"][1]
                     else:

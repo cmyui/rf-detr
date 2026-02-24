@@ -295,6 +295,7 @@ class TrainConfig(BaseModel):
     warmup_epochs: float = 0.0
     lr_scheduler: Literal["step", "cosine"] = "step"
     eval_interval: int = 1
+    light_eval_size: int = 0
     lr_vit_layer_decay: float = 0.8
     lr_component_decay: float = 0.7
     drop_path: float = 0.0
