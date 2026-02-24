@@ -70,6 +70,90 @@ def get_autocast_args(args):
         return {"device_type": "cuda", "enabled": args.amp, "dtype": autocast_dtype}
 
 
+def _compute_distillation_loss(
+    student_outputs: dict,
+    teacher_outputs: dict,
+    temperature: float,
+    confidence_threshold: float,
+) -> dict[str, torch.Tensor]:
+    """Compute output-level distillation losses between teacher and student.
+
+    Teacher and student may have different numbers of queries. For each image,
+    we select high-confidence teacher predictions, match them to student queries
+    by box IoU, and compute KL-divergence on logits + L1 on boxes for matched pairs.
+    """
+    s_logits = student_outputs["pred_logits"]  # [B, Ns, C]
+    s_boxes = student_outputs["pred_boxes"]    # [B, Ns, 4]
+    t_logits = teacher_outputs["pred_logits"]  # [B, Nt, C]
+    t_boxes = teacher_outputs["pred_boxes"]    # [B, Nt, 4]
+
+    B = s_logits.shape[0]
+    total_logit_loss = s_logits.new_tensor(0.0)
+    total_box_loss = s_logits.new_tensor(0.0)
+    num_matched = 0
+
+    for b in range(B):
+        # Teacher confidence: max sigmoid probability per query
+        t_conf = t_logits[b].sigmoid().max(dim=-1).values  # [Nt]
+        mask = t_conf >= confidence_threshold
+        if not mask.any():
+            continue
+
+        t_logits_b = t_logits[b][mask]  # [K, C]
+        t_boxes_b = t_boxes[b][mask]    # [K, 4]  (cx, cy, w, h)
+
+        # Compute IoU cost matrix between teacher (K) and student (Ns) boxes
+        # Convert cxcywh to xyxy for IoU
+        from rfdetr.util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
+        t_xyxy = box_cxcywh_to_xyxy(t_boxes_b)
+        s_xyxy = box_cxcywh_to_xyxy(s_boxes[b])
+        iou_matrix = generalized_box_iou(t_xyxy, s_xyxy)  # [K, Ns]
+
+        # Greedy 1-to-1 matching: each teacher pred gets the best available student query
+        K = t_logits_b.shape[0]
+        used_student = set()
+        matches = []  # list of (teacher_idx, student_idx)
+        # Sort teacher predictions by confidence (highest first)
+        sorted_t = t_conf[mask].argsort(descending=True)
+        for t_idx_rel, t_sorted in enumerate(sorted_t):
+            ious = iou_matrix[t_idx_rel]
+            # Mask out already-used student queries
+            for s_used in used_student:
+                ious[s_used] = -2.0
+            best_s = ious.argmax().item()
+            if ious[best_s] > -1.0:  # valid IoU
+                matches.append((t_idx_rel, best_s))
+                used_student.add(best_s)
+
+        if not matches:
+            continue
+
+        t_idxs = [m[0] for m in matches]
+        s_idxs = [m[1] for m in matches]
+
+        # Logit distillation: KL-div with temperature scaling
+        t_soft = F.log_softmax(t_logits_b[t_idxs] / temperature, dim=-1)
+        s_soft = F.log_softmax(s_logits[b][s_idxs] / temperature, dim=-1)
+        kl = F.kl_div(s_soft, t_soft, log_target=True, reduction="batchmean")
+        total_logit_loss = total_logit_loss + kl * (temperature ** 2)
+
+        # Box distillation: L1
+        total_box_loss = total_box_loss + F.l1_loss(
+            s_boxes[b][s_idxs], t_boxes_b[t_idxs],
+        )
+        num_matched += len(matches)
+
+    # Average over batch
+    if num_matched > 0:
+        total_logit_loss = total_logit_loss / B
+        total_box_loss = total_box_loss / B
+
+    return {
+        "loss_distill_logit": total_logit_loss,
+        "loss_distill_box": total_box_loss,
+    }
+
+
 def train_one_epoch(
     model: torch.nn.Module,
     criterion: torch.nn.Module,
@@ -86,6 +170,7 @@ def train_one_epoch(
     vit_encoder_num_layers=None,
     args=None,
     callbacks: DefaultDict[str, List[Callable]] = None,
+    teacher_model: torch.nn.Module = None,
 ):
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
@@ -171,16 +256,33 @@ def train_one_epoch(
             new_samples = new_samples.to(device)
             new_targets = [{k: v.to(device) for k, v in t.items()} for t in targets[start_idx:final_idx]]
 
+            # Teacher forward (no grad, outside autocast for stability)
+            teacher_outputs = None
+            if teacher_model is not None:
+                with torch.no_grad():
+                    teacher_outputs = teacher_model(new_samples)
+
             with autocast(**get_autocast_args(args)):
                 outputs = model(new_samples, new_targets)
                 loss_dict = criterion(outputs, new_targets)
                 weight_dict = criterion.weight_dict
+
+                # Knowledge distillation losses
+                if teacher_outputs is not None:
+                    distill_losses = _compute_distillation_loss(
+                        outputs, teacher_outputs,
+                        temperature=args.distill_temperature,
+                        confidence_threshold=args.distill_confidence_threshold,
+                    )
+                    loss_dict.update(distill_losses)
+
                 losses = sum(
                     (1 / args.grad_accum_steps) * loss_dict[k] * weight_dict[k]
                     for k in loss_dict.keys()
                     if k in weight_dict
                 )
                 del outputs
+                del teacher_outputs
 
             scaler.scale(losses).backward()
 

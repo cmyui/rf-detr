@@ -342,6 +342,22 @@ class TrainConfig(BaseModel):
         return os.path.realpath(os.path.expanduser(v))
 
 
+    # Knowledge distillation (teacher -> student)
+    distill_teacher_checkpoint: Optional[str] = None
+    distill_teacher_config: Optional[str] = None  # model size key, e.g. "xlarge"
+    distill_logit_weight: float = 2.0
+    distill_box_weight: float = 1.0
+    distill_temperature: float = 4.0
+    distill_confidence_threshold: float = 0.3
+
+    @field_validator("distill_teacher_checkpoint", mode="after")
+    @classmethod
+    def expand_teacher_path(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return os.path.realpath(os.path.expanduser(v))
+
+
 class SegmentationTrainConfig(TrainConfig):
     num_select: Optional[int] = None
     mask_point_sample_ratio: int = 16

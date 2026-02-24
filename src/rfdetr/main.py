@@ -78,6 +78,51 @@ def _run_on_train_end_callbacks(callbacks: DefaultDict[str, List[Callable]]) -> 
         callback()
 
 
+def _load_teacher_model(
+    teacher_config_name: str,
+    checkpoint_path: str,
+    num_classes: int,
+    device: torch.device,
+) -> torch.nn.Module:
+    """Load a frozen teacher model for knowledge distillation."""
+    from rfdetr.config import (
+        RFDETRSegLargeConfig,
+        RFDETRSegMediumConfig,
+        RFDETRSegNanoConfig,
+        RFDETRSegSmallConfig,
+        RFDETRSegXLargeConfig,
+    )
+
+    teacher_configs = {
+        "nano": RFDETRSegNanoConfig,
+        "small": RFDETRSegSmallConfig,
+        "medium": RFDETRSegMediumConfig,
+        "large": RFDETRSegLargeConfig,
+        "xlarge": RFDETRSegXLargeConfig,
+    }
+    teacher_cfg = teacher_configs[teacher_config_name](
+        num_classes=num_classes, pretrain_weights=None,
+    )
+    teacher_args = populate_args(**teacher_cfg.dict())
+    teacher_model = build_model(teacher_args)
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if "ema_model" in checkpoint:
+        state_dict = checkpoint["ema_model"]
+    elif "model" in checkpoint:
+        state_dict = checkpoint["model"]
+    else:
+        state_dict = checkpoint
+    teacher_model.load_state_dict(state_dict, strict=True)
+
+    teacher_model.to(device)
+    teacher_model.eval()
+    for p in teacher_model.parameters():
+        p.requires_grad_(False)
+
+    return teacher_model
+
+
 class Model:
     def __init__(self, **kwargs):
         args = populate_args(**kwargs)
@@ -383,6 +428,27 @@ class Model:
             _run_on_train_end_callbacks(callbacks)
             return
 
+        # Knowledge distillation: load teacher model
+        teacher_model = None
+        distill_teacher_checkpoint = getattr(args, "distill_teacher_checkpoint", None)
+        distill_teacher_config = getattr(args, "distill_teacher_config", None)
+        if distill_teacher_checkpoint and distill_teacher_config:
+            teacher_model = _load_teacher_model(
+                distill_teacher_config, distill_teacher_checkpoint,
+                args.num_classes, device,
+            )
+            distill_logit_weight = getattr(args, "distill_logit_weight", 2.0)
+            distill_box_weight = getattr(args, "distill_box_weight", 1.0)
+            criterion.weight_dict["loss_distill_logit"] = distill_logit_weight
+            criterion.weight_dict["loss_distill_box"] = distill_box_weight
+            logger.info(
+                "Loaded teacher model (%s) from %s for distillation "
+                "(logit_weight=%.1f, box_weight=%.1f, temp=%.1f)",
+                distill_teacher_config, distill_teacher_checkpoint,
+                distill_logit_weight, distill_box_weight,
+                getattr(args, "distill_temperature", 4.0),
+            )
+
         if args.eval:
             test_stats, coco_evaluator = evaluate(model, criterion, postprocess, data_loader_val, base_ds, device, args)
             if args.output_dir:
@@ -454,6 +520,7 @@ class Model:
                 vit_encoder_num_layers=args.vit_encoder_num_layers,
                 args=args,
                 callbacks=callbacks,
+                teacher_model=teacher_model,
             )
             train_epoch_time = time.time() - epoch_start_time
             train_epoch_time_str = str(datetime.timedelta(seconds=int(train_epoch_time)))
