@@ -57,45 +57,18 @@ class CocoEvaluator(object):
         self.img_ids: List[int] = []
         self.eval_imgs: Dict[str, List[COCOeval]] = {k: [] for k in iou_types}
         self.cat_ids = set(coco_gt.cats.keys())
-        self._prefer_raw_category_ids = False
+        # _prefer_raw_category_ids removed: use label2cat when available
 
-    def _resolve_category_id(self, label: int, use_raw_category_ids: bool) -> Optional[int]:
+    def _resolve_category_id(self, label: int) -> Optional[int]:
         """Resolve a predicted label to a COCO category_id.
 
-        Supports both:
-        - contiguous model labels (resolved via ``label2cat``), and
-        - already raw COCO category_ids (legacy checkpoint behavior).
+        When ``label2cat`` is available (dataset was built with category
+        remapping), map contiguous 0-indexed model labels back to COCO
+        category IDs.  Otherwise, treat labels as raw COCO category IDs.
         """
-        # In raw-ID mode, labels are already COCO category IDs from model output.
-        if use_raw_category_ids:
-            return label if label in self.cat_ids else None
-        # In contiguous mode, map model class indices back to COCO category IDs.
-        if self.label2cat is not None and label in self.label2cat:
-            return self.label2cat[label]
-        # Fallback for mixed/legacy behavior where labels may already be COCO IDs.
-        if label in self.cat_ids:
-            return label
-        return None
-
-    def _should_use_raw_category_ids(self, labels: List[int]) -> bool:
-        """Detect whether current predictions are emitted as raw COCO category IDs.
-
-        If labels include values that are valid COCO category IDs but not valid
-        contiguous-label indices, switch to raw-ID mode and keep it for the rest
-        of the evaluator lifetime.
-        """
-        if self.label2cat is None:
-            return True
-        if self._prefer_raw_category_ids:
-            return True
-
-        # If any label is a COCO category ID but not a valid contiguous index,
-        # treat the whole run as raw-ID output to avoid corrupting eval categories.
-        uses_raw_ids = any((label in self.cat_ids) and (label not in self.label2cat) for label in labels)
-        if uses_raw_ids:
-            self._prefer_raw_category_ids = True
-            return True
-        return False
+        if self.label2cat is not None:
+            return self.label2cat.get(label)
+        return label if label in self.cat_ids else None
 
     def update(self, predictions: Dict[int, Any]) -> None:
         img_ids = list(np.unique(list(predictions.keys())))
@@ -150,9 +123,8 @@ class CocoEvaluator(object):
             boxes = sv.xyxy_to_xywh(boxes.cpu().numpy()).tolist()
             scores = prediction["scores"].tolist()
             labels = prediction["labels"].tolist()
-            use_raw_category_ids = self._should_use_raw_category_ids(labels)
             for k, box in enumerate(boxes):
-                category_id = self._resolve_category_id(labels[k], use_raw_category_ids)
+                category_id = self._resolve_category_id(labels[k])
                 # Drop predictions that cannot be mapped to a valid COCO category.
                 if category_id is None:
                     continue
@@ -180,7 +152,6 @@ class CocoEvaluator(object):
 
             scores = prediction["scores"].tolist()
             labels = prediction["labels"].tolist()
-            use_raw_category_ids = self._should_use_raw_category_ids(labels)
 
             rles = [
                 mask_util.encode(np.array(mask.cpu()[0, :, :, np.newaxis], dtype=np.uint8, order="F"))[0]
@@ -190,7 +161,7 @@ class CocoEvaluator(object):
                 rle["counts"] = rle["counts"].decode("utf-8")
 
             for k, rle in enumerate(rles):
-                category_id = self._resolve_category_id(labels[k], use_raw_category_ids)
+                category_id = self._resolve_category_id(labels[k])
                 # Drop predictions that cannot be mapped to a valid COCO category.
                 if category_id is None:
                     continue
@@ -216,9 +187,8 @@ class CocoEvaluator(object):
             labels = prediction["labels"].tolist()
             keypoints = prediction["keypoints"]
             keypoints = keypoints.flatten(start_dim=1).tolist()
-            use_raw_category_ids = self._should_use_raw_category_ids(labels)
             for k, keypoint in enumerate(keypoints):
-                category_id = self._resolve_category_id(labels[k], use_raw_category_ids)
+                category_id = self._resolve_category_id(labels[k])
                 # Drop predictions that cannot be mapped to a valid COCO category.
                 if category_id is None:
                     continue
