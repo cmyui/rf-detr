@@ -222,7 +222,9 @@ def point_sample(input, point_coords, **kwargs):
     if point_coords.dim() == 3:
         add_dim = True
         point_coords = point_coords.unsqueeze(2)
-    output = F.grid_sample(input, 2.0 * point_coords - 1.0, padding_mode="border", **kwargs)
+    # MPS doesn't support border padding mode; fall back to zeros
+    padding_mode = "zeros" if input.device.type == "mps" else "border"
+    output = F.grid_sample(input, 2.0 * point_coords - 1.0, padding_mode=padding_mode, **kwargs)
     if add_dim:
         output = output.squeeze(3)
     return output

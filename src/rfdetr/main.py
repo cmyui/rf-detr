@@ -84,7 +84,14 @@ def _load_teacher_model(
     num_classes: int,
     device: torch.device,
 ) -> torch.nn.Module:
-    """Load a frozen teacher model for knowledge distillation."""
+    """Load a frozen teacher model for knowledge distillation.
+
+    Mirrors the student initialization path: build with default num_classes,
+    then reinitialize the detection head to match the checkpoint.
+    build_model() internally adds +1 to num_classes, but
+    reinitialize_detection_head() uses the exact value passed, so we must
+    follow the same sequence used during training.
+    """
     from rfdetr.config import (
         RFDETRSegLargeConfig,
         RFDETRSegMediumConfig,
@@ -100,11 +107,11 @@ def _load_teacher_model(
         "large": RFDETRSegLargeConfig,
         "xlarge": RFDETRSegXLargeConfig,
     }
-    teacher_cfg = teacher_configs[teacher_config_name](
-        num_classes=num_classes, pretrain_weights=None,
-    )
+    # Build with default num_classes (90), then reinitialize to match checkpoint
+    teacher_cfg = teacher_configs[teacher_config_name](pretrain_weights=None)
     teacher_args = populate_args(**teacher_cfg.dict())
     teacher_model = build_model(teacher_args)
+    teacher_model.reinitialize_detection_head(num_classes)
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if "ema_model" in checkpoint:
