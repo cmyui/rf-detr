@@ -174,7 +174,7 @@ def train_one_epoch(
 ):
     metric_logger = utils.MetricLogger(
         delimiter="  ",
-        display_keys=["lr", "loss", "loss_bbox", "loss_giou", "loss_ce", "loss_mask_ce", "loss_mask_dice", "class_error"],
+        display_keys=["lr", "loss"],
     )
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
     metric_logger.add_meter("class_error", utils.SmoothedValue(window_size=1, fmt="{value:.2f}"))
@@ -526,7 +526,7 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
 
     metric_logger = utils.MetricLogger(
         delimiter="  ",
-        display_keys=["loss", "loss_bbox", "loss_giou", "loss_ce", "loss_mask_ce", "loss_mask_dice", "class_error"],
+        display_keys=["loss"],
     )
     metric_logger.add_meter("class_error", utils.SmoothedValue(window_size=1, fmt="{value:.2f}"))
     iou_types = ("bbox",) if not args.segmentation_head else ("bbox", "segm")
