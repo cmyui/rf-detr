@@ -172,7 +172,10 @@ def train_one_epoch(
     callbacks: DefaultDict[str, List[Callable]] = None,
     teacher_model: torch.nn.Module = None,
 ):
-    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger = utils.MetricLogger(
+        delimiter="  ",
+        display_keys=["lr", "loss", "loss_bbox", "loss_giou", "loss_ce", "loss_mask_ce", "loss_mask_dice", "class_error"],
+    )
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
     metric_logger.add_meter("class_error", utils.SmoothedValue(window_size=1, fmt="{value:.2f}"))
     print_freq = args.print_freq if args is not None else 10
@@ -521,7 +524,10 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
         model.half()
     criterion.eval()
 
-    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger = utils.MetricLogger(
+        delimiter="  ",
+        display_keys=["loss", "loss_bbox", "loss_giou", "loss_ce", "loss_mask_ce", "loss_mask_dice", "class_error"],
+    )
     metric_logger.add_meter("class_error", utils.SmoothedValue(window_size=1, fmt="{value:.2f}"))
     iou_types = ("bbox",) if not args.segmentation_head else ("bbox", "segm")
     coco_evaluator = CocoEvaluator(base_ds, iou_types, args.eval_max_dets)

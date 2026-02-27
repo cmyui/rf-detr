@@ -176,9 +176,10 @@ def reduce_dict(input_dict: Dict[str, torch.Tensor], average: bool = True) -> Di
 
 
 class MetricLogger(object):
-    def __init__(self, delimiter: str = "\t", wandb_logging: bool = False) -> None:
+    def __init__(self, delimiter: str = "\t", wandb_logging: bool = False, display_keys: Optional[List[str]] = None) -> None:
         self.meters = defaultdict(SmoothedValue)
         self.delimiter = delimiter
+        self.display_keys = display_keys
         if wandb_logging:
             import wandb
 
@@ -202,7 +203,10 @@ class MetricLogger(object):
 
     def __str__(self) -> str:
         loss_str = []
-        for name, meter in self.meters.items():
+        items = self.meters.items()
+        if self.display_keys is not None:
+            items = ((k, self.meters[k]) for k in self.display_keys if k in self.meters)
+        for name, meter in items:
             loss_str.append("{}: {}".format(name, str(meter)))
         return self.delimiter.join(loss_str)
 
